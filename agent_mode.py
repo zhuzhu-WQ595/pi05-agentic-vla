@@ -33,16 +33,31 @@ MODEL_PATH = os.environ.get("PI05_MODEL_PATH", "./models/pi05-libero")
 AGENT_TOOLS = [
     {
         "name": "execute_task",
-        "description": "Execute a manipulation task using the robot arm. Runs VLA for up to 280 steps. Does NOT return success/failure - use get_scene_info to verify result.",
+        "description": "Execute ONE manipulation task using the robot arm. Runs VLA for up to 280 steps (stops early if env signals success). Returns env success flag - still call get_scene_info to verify result visually.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "A manipulation task instruction, e.g., 'open the drawer', 'close the drawer', 'pick up the butter'"
+                    "description": "A free-form manipulation instruction, e.g., 'open the drawer', 'put the bowl on the stove', 'pick up the plate'"
                 }
             },
             "required": ["task"]
+        }
+    },
+    {
+        "name": "execute_sequence",
+        "description": "Execute an ordered list of subtasks for multi-step / long-horizon requests (e.g. 'open the drawer, then put the bowl inside'). Each subtask runs up to 280 steps with arm reset between steps. Returns per-subtask env success flags - call get_scene_info afterward to verify final state.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of manipulation instructions to execute in sequence"
+                }
+            },
+            "required": ["tasks"]
         }
     },
     {
@@ -238,6 +253,13 @@ class RobotAgent:
         self.last_task_success = False
         self.last_task_steps = 0
 
+        # If the env's built-in goal is already satisfied from a previous
+        # subtask, is_success stays True and must not early-stop this run.
+        try:
+            residual_success = bool(self.env._env.check_success())
+        except Exception:
+            residual_success = False
+
         for step in range(max_steps):
             # Process observation
             processed_obs = self._process_obs(self.obs)
@@ -258,7 +280,17 @@ class RobotAgent:
                 print(f"  Step {step}: action={action_np[:3]}...")
 
             # Step environment
-            self.obs, reward, done, truncated, info = self.env.step(action_np)
+            try:
+                self.obs, reward, done, truncated, info = self.env.step(action_np)
+            except Exception as e:
+                self._env_terminated = True
+                print(f"  ⚠️ Env step failed: {e}")
+                return {
+                    "steps": self.last_task_steps,
+                    "success": False,
+                    "error": "episode_terminated",
+                    "message": f"Environment episode ended ({e}). No further actions possible - ask the user to type 'reset' to start a new episode."
+                }
 
             # Sync viewer if available
             if self.viewer and self.viewer.is_running():
@@ -273,10 +305,50 @@ class RobotAgent:
             if step % 50 == 0:
                 print(f"  Step {step}/{max_steps}")
 
-        print(f"⏱️ Task completed: {max_steps} steps executed")
+            # Early stop only on a FRESH env success (not residual from
+            # a previous subtask's goal satisfaction).
+            if info.get("is_success", False) and not residual_success:
+                self.last_task_success = True
+                self._env_terminated = True
+                print(f"  ✅ Env success signal at step {step + 1}")
+                break
+
+        print(f"⏱️ Task finished: {self.last_task_steps} steps executed")
         return {
-            "steps": max_steps,
-            "message": f"Executed {max_steps} steps. Use get_scene_info to verify result."
+            "steps": self.last_task_steps,
+            "success": self.last_task_success,
+            "message": f"Executed {self.last_task_steps} steps (env_success={self.last_task_success}). Verify result with get_scene_info."
+        }
+
+    def execute_sequence(self, tasks: list, max_steps: int = 280) -> dict:
+        """Execute an ordered chain of subtasks for long-horizon requests.
+
+        Each subtask runs a full execute_task cycle (arm pose reset between
+        subtasks, scene objects preserved). The env success flag is only
+        meaningful when a subtask matches the env's built-in goal; for custom
+        subtasks it stays False and the LLM should verify via get_scene_info.
+        """
+        print(f"\n🔗 Executing sequence of {len(tasks)} subtasks")
+        results = []
+        for i, task in enumerate(tasks):
+            print(f"\n--- Subtask {i + 1}/{len(tasks)}: {task} ---")
+            res = self.execute_task(task, max_steps=max_steps)
+            results.append({
+                "subtask": task,
+                "steps": res["steps"],
+                "env_success": res["success"]
+            })
+            if self._env_terminated:
+                # Env's built-in goal fired - the sim still steps physically,
+                # so continue the chain but mark that the success signal for
+                # later subtasks is unreliable.
+                results[-1]["note"] = "env goal terminated; later subtasks run without reliable env success signal"
+                self._env_terminated = False
+        return {
+            "results": results,
+            "completed_subtasks": len(results),
+            "total_subtasks": len(tasks),
+            "message": "Sequence executed. Use get_scene_info to verify the final state against the user's goal."
         }
 
     def _call_mcp_understand_image(self, image_path: str, prompt: str) -> str:
@@ -424,24 +496,13 @@ Be concise."""
     def process_tool_call(self, tool_name: str, tool_input: dict) -> str:
         """Process a tool call from the LLM."""
         if tool_name == "execute_task":
-            task = tool_input["task"]
-            # Validate task is in supported list
-            SUPPORTED_TASKS = [
-                "open the middle drawer of the cabinet",
-                "put the bowl on the stove",
-                "put the wine bottle on top of the cabinet",
-                "open the top drawer and put the bowl inside",
-                "put the bowl on top of the cabinet",
-                "push the plate to the front of the stove",
-                "put the cream cheese in the bowl",
-                "turn on the stove",
-                "put the bowl on the plate",
-                "put the wine bottle on the rack"
-            ]
-            if task not in SUPPORTED_TASKS:
-                result = {"error": f"Task '{task}' is NOT supported. Only these 10 tasks are available: {SUPPORTED_TASKS}"}
+            result = self.execute_task(tool_input["task"])
+        elif tool_name == "execute_sequence":
+            tasks = tool_input["tasks"]
+            if not isinstance(tasks, list) or not tasks:
+                result = {"error": "tasks must be a non-empty list of instruction strings"}
             else:
-                result = self.execute_task(task)
+                result = self.execute_sequence(tasks)
         elif tool_name == "get_scene_info":
             result = self.get_scene_info()
         else:
@@ -499,40 +560,44 @@ Be concise."""
         system_prompt = f"""You are a robot manipulation agent. You interpret user requests and execute appropriate tasks.
 
 Current environment: {self.suite_name}
-Current scene: {self.env.task_description}
+Current scene task: {self.env.task_description}
 
-⚠️ ONLY THESE 10 TASKS ARE SUPPORTED - NO OTHER TASKS EXIST:
-1. "open the middle drawer of the cabinet"
-2. "put the bowl on the stove"
-3. "put the wine bottle on top of the cabinet"
-4. "open the top drawer and put the bowl inside"
-5. "put the bowl on top of the cabinet"
-6. "push the plate to the front of the stove"
-7. "put the cream cheese in the bowl"
-8. "turn on the stove"
-9. "put the bowl on the plate"
-10. "put the wine bottle on the rack"
+The robot runs a pi05 VLA policy conditioned on FREE-FORM English task text.
+You may execute ANY reasonable manipulation instruction involving objects in this scene
+(cabinet drawers, stove, bowl, wine bottle, plate, cream cheese, rack).
 
-⛔ FORBIDDEN - These tasks DO NOT EXIST and CANNOT be executed:
-- "close drawer" (any drawer) - NOT SUPPORTED
-- "pick up" anything - NOT SUPPORTED
-- Any task not in the list above - NOT SUPPORTED
+Verified example tasks for this scene:
+- "open the middle drawer of the cabinet"
+- "put the bowl on the stove"
+- "put the wine bottle on top of the cabinet"
+- "open the top drawer and put the bowl inside"
+- "put the bowl on top of the cabinet"
+- "push the plate to the front of the stove"
+- "put the cream cheese in the bowl"
+- "turn on the stove"
+- "put the bowl on the plate"
+- "put the wine bottle on the rack"
 
 YOUR JOB:
-- Interpret user's intent and map to available tasks above
-- If user asks for something impossible (like closing drawer), explain it's not supported
-- Execute tasks automatically using EXACT task strings from the list
+- Interpret the user's intent and translate it into clear English manipulation instructions
+- For multi-step / long-horizon requests ("X, then Y", "A and B"), split into ordered
+  subtasks and use execute_sequence
+- For single-step requests use execute_task
+- Verify results with get_scene_info (VLM); retry once on failure before reporting
 
 Tools:
-1. execute_task: Pass EXACT task string from the 10 supported tasks
-2. get_scene_info: Verify task result using VLM
+1. execute_task: run one task (up to 280 steps, early-stops on env success)
+2. execute_sequence: run an ordered subtask list for multi-step requests
+3. get_scene_info: VLM scene verification
 
 RULES:
 1. Call ONE tool at a time. Wait for result before next action.
-2. After execute_task, call get_scene_info to verify result.
-3. If verification shows FAILURE, RETRY the same task ONCE more before reporting failure.
+2. After execution (task or sequence), call get_scene_info to verify the result.
+3. If verification shows FAILURE, retry ONCE more before reporting failure.
 4. Execute tasks directly - do NOT ask user for confirmation.
-5. If user says "继续" or "continue", continue the previous task."""
+5. If a tool returns episode_terminated, the episode is over - tell the user to
+   type 'reset' to start a new episode instead of retrying.
+6. If user says "继续" or "continue", continue the previous task."""
 
         # Add new user request to conversation history
         self.conversation_history.append({"role": "user", "content": user_request})
