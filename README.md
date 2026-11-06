@@ -1,10 +1,14 @@
 # Pi05 Robot Agent
 
-基于 Pi05 VLA 模型和 MiniMax-M2.1 LLM 的机器人Agent系统，在 LIBERO 仿真环境中执行操作任务。
+基于 Pi05 VLA 模型和 MiniMax-M3 LLM 的机器人Agent系统，在 LIBERO 仿真环境中执行操作任务。
 
 ## Demo
 
 ![Demo](./demo.webp)
+
+![Eval](./demo_eval.webp)
+
+> 官方 `lerobot-eval` libero_object 套件：30/30 成功（`lerobot/pi05-libero` 权重）
 
 ## 系统架构
 
@@ -15,7 +19,7 @@
 ```
 
 - **Pi05 VLA**: 视觉-语言-动作模型，执行具体操作任务
-- **MiniMax-M2.1 LLM**: 任务规划、理解用户意图
+- **MiniMax-M3 LLM**: 任务规划、理解用户意图
 - **MiniMax MCP**: 视觉理解，验证任务执行结果
 - **LIBERO/MuJoCo**: 机器人仿真环境
 

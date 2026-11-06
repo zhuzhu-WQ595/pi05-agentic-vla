@@ -1,10 +1,14 @@
 # Pi05 Robot Agent
 
-A robot agent system based on Pi05 VLA model and MiniMax-M2.1 LLM for manipulation tasks in LIBERO simulation environment.
+A robot agent system based on Pi05 VLA model and MiniMax-M3 LLM for manipulation tasks in LIBERO simulation environment.
 
 ## Demo
 
 ![Demo](./demo.webp)
+
+![Eval](./demo_eval.webp)
+
+> Official `lerobot-eval` on `libero_object` suite: 30/30 success (`lerobot/pi05-libero` weights)
 
 ## Architecture
 
@@ -15,7 +19,7 @@ User Command → MiniMax LLM (Task Planning) → Pi05 VLA (Action Execution) →
 ```
 
 - **Pi05 VLA**: Vision-Language-Action model for task execution
-- **MiniMax-M2.1 LLM**: Task planning and user intent understanding
+- **MiniMax-M3 LLM**: Task planning and user intent understanding
 - **MiniMax MCP**: Visual understanding for task verification
 - **LIBERO/MuJoCo**: Robot simulation environment
 
