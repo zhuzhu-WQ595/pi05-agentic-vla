@@ -1,0 +1,26 @@
+# Core dependencies
+torch>=2.0.0
+numpy
+pillow
+einops
+draccus
+
+# Physics simulation
+mujoco>=3.0.0
+
+# Robot simulation
+libero
+robosuite
+
+# LLM and MCP
+anthropic
+mcp
+
+# Transformers for Pi05
+transformers
+huggingface_hub
+
+# VLA policy framework (vendored copy in lerobot_vendored/ for reference;
+# install the PyPI release — demo imports the installed package)
+lerobot>=0.6.0
+transformers>=5.4,<5.6
